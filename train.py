@@ -15,12 +15,7 @@ import glob as glob
 from PIL import Image
 import model
 
-import matplotlib.pyplot as plt
-
 import utils
-
-
-time_calc = utils.Time_calculator()
 
 
 # =======================================================================================================================
@@ -28,7 +23,7 @@ time_calc = utils.Time_calculator()
 # =======================================================================================================================
 parser = argparse.ArgumentParser()
 # Options for path =====================================================================================================
-parser.add_argument('--dataset', default='CelebA', help='what is dataset?',
+parser.add_argument('--dataset', default='MNIST', help='what is dataset?',
                     choices=['CelebA',  'MNIST'])
 parser.add_argument('--dataroot',
                     default='/home/mlpa/Workspace/dataset/CelebA/Img/img_anlign_celeba_png.7z/img_align_celeba_png',
@@ -37,8 +32,6 @@ parser.add_argument('--pretrainedEpoch', type=int, default=0,
                     help="path of Decoder networks. '0' is training from scratch.")
 parser.add_argument('--modelOutFolder', default='/home/mlpa/Workspace/experimental_result/LJY/VAEGAN',
                     help="folder to model checkpoints.")
-parser.add_argument('--resultOutFolder', default='/home/mlpa/data_4T/experiment_results/ljy/results',
-                    help="folder to test results")
 parser.add_argument('--save_tick', type=int, default=1, help='save tick. default is 1')
 parser.add_argument('--epoch', type=int, default=255, help='number of epochs to train for')
 
@@ -50,9 +43,8 @@ parser.add_argument('--nz', type=int, default=100, help='number of input channel
 parser.add_argument('--ngf', type=int, default=64, help='number of generator filters.')
 parser.add_argument('--ndf', type=int, default=64, help='number of discriminator filters.')
 
-parser.add_argument('--seed', type=int, help='manual seed')
+parser.add_argument('--seed', type=int, default=1, help='manual seed')
 
-parser.add_argument('--TrainingTimesave', action='store_true', help='save csv for gradient')
 parser.add_argument('--save', action='store_true', help='save options. default:False.')
 parser.add_argument('--cuda', action='store_true', help='enables cuda')
 
@@ -64,15 +56,12 @@ options = parser.parse_args()
 
 print(options)
 
-visualize_latent = False
-recon_learn = True
-cycle_learn = False
 recon_weight = 5
 encoder_weight = 1.0
 decoder_weight = 1.0
+autoencoder_type = "VAE"
+nz = options.nz
 
-options.autoencoderType = 'VAE'
-options.pretrainedModelName = options.preset + '_' + options.dataset
 
 
 # criterion set
@@ -160,43 +149,33 @@ else:
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-
-    def weight_init(module):
-        classname = module.__class__.__name__
-        if classname.find('Conv') != -1:
-            torch.nn.init.xavier_normal(module.weight.data)
-        elif classname.find('BatchNorm') != -1:
-            module.weight.data.normal_(1.0, 0.02)
-            module.bias.data.fill_(0)
-        elif classname.find('Linear') != -1:
-            torch.nn.init.normal(module.weight.data)
-
+def model_init(autoencoder_type):
     nz = int(options.nz)
     if options.dataset == 'MNIST':
         encoder = model.encoder32x32(num_in_channels=1, z_size=nz, num_filters=64, type=autoencoder_type)
-        encoder.apply(LJY_utils.weights_init)
+        encoder.apply(utils.weights_init)
         print(encoder)
 
         decoder = model.decoder32x32(num_in_channels=1, z_size=nz, num_filters=64)
-        decoder.apply(LJY_utils.weights_init)
+        decoder.apply(utils.weights_init)
         print(decoder)
 
         discriminator = model.Discriminator32x32(num_in_channels=1, num_filters=64)
-        discriminator.apply(LJY_utils.weights_init)
+        discriminator.apply(utils.weights_init)
         print(discriminator)
 
     elif options.dataset == 'CelebA':
-            encoder = model.encoder64x64(num_in_channels=3, z_size=nz, num_filters=64, type=autoencoder_type)
-            encoder.apply(LJY_utils.weights_init)
-            print(encoder)
+        encoder = model.encoder64x64(num_in_channels=3, z_size=nz, num_filters=64, type=autoencoder_type)
+        encoder.apply(utils.weights_init)
+        print(encoder)
 
-            decoder = model.decoder64x64(num_in_channels=3, z_size=nz, num_filters=64)
-            decoder.apply(LJY_utils.weights_init)
-            print(decoder)
+        decoder = model.decoder64x64(num_in_channels=3, z_size=nz, num_filters=64)
+        decoder.apply(utils.weights_init)
+        print(decoder)
 
-            discriminator = model.discriminator64x64(num_in_channels=3, num_filters=64)
-            discriminator.apply(LJY_utils.weights_init)
-            print(discriminator)
+        discriminator = model.discriminator64x64(num_in_channels=3, num_filters=64)
+        discriminator.apply(utils.weights_init)
+        print(discriminator)
 
     if options.cuda:
         encoder.cuda()
@@ -206,37 +185,25 @@ else:
         BCE_loss.cuda()
         L1_loss.cuda()
 
-    return encoder, decoder, discriminator, z_discriminator
+    return encoder, decoder, discriminator
 
 
 # =======================================================================================================================
 # Data and Parameters
 # =======================================================================================================================
+encoder, decoder, discriminator = model_init(autoencoder_type)
 
-# MNIST call and load   ================================================================================================
-autoencoder_type = options.autoencoderType
-nz = options.nz
-ngpu = options.ngpu
-encoder, decoder, discriminator, z_discriminator = model_init(autoencoder_type)
-
-# =======================================================================================================================
-# Training
-# =======================================================================================================================
-
-
-# setup optimizer   ====================================================================================================
-# todo add betas=(0.5, 0.999),
 optimizerD = optim.Adam(decoder.parameters(), betas=(0.5, 0.9), lr=0.0005)
 optimizerE = optim.Adam(encoder.parameters(), betas=(0.5, 0.9), lr=0.0001)
 optimizerDiscriminator = optim.Adam(discriminator.parameters(), betas=(0.5, 0.9), lr=0.0005)
 
-# training start
+
+# =======================================================================================================================
+# Training
+# =======================================================================================================================
 def train():
-    validation_path = os.path.join(os.path.dirname(options.modelOutFolder),
-                                   '%s_%s_%s' % (options.dataset, options.intergrationType, options.autoencoderType))
-    validation_path = LJY_utils.make_dir(validation_path, allow_duplication=True)
     save_path = os.path.join(options.modelOutFolder)
-    save_path = LJY_utils.make_dir(save_path)
+    save_path = utils.make_dir(save_path)
     ep = options.pretrainedEpoch
     if ep != 0:
         if options.DiscriminatorLoad is True:
@@ -249,152 +216,108 @@ def train():
                 os.path.join(options.modelOutFolder, options.pretrainedModelName + "_decoder" + "_%d.pth" % ep)))
             discriminator.load_state_dict(torch.load(
                 os.path.join(options.modelOutFolder, options.pretrainedModelName + "_discriminator" + "_%d.pth" % ep)))
-            z_discriminator.load_state_dict(torch.load(os.path.join(options.modelOutFolder,
-                                                                    options.pretrainedModelName + "_z_discriminator" + "_%d.pth" % ep)))
     if options.dataset == 'MNIST':
         dataloader = torch.utils.data.DataLoader(
-            dset.MNIST(root='../../data', train=True, download=True,
+            dset.MNIST(root='../data/MNIST', train=True, download=True,
                        transform=transforms.Compose([
                            transforms.ToTensor(),
                            transforms.Normalize((0.5,), (0.5,))
                        ])),
-            batch_size=options.batchSize, shuffle=True, num_workers=options.workers)
+            batch_size=options.batchSize, shuffle=True)
         val_dataloader = torch.utils.data.DataLoader(
-            dset.MNIST('../../data', train=False, download=True,
+            dset.MNIST('../data/MNIST', train=False, download=True,
                        transform=transforms.Compose([
                            transforms.ToTensor(),
                            transforms.Normalize((0.5,), (0.5,))
                        ])),
-            batch_size=100, shuffle=False, num_workers=options.workers)
-    if options.dataset == 'CIFAR10':
-        dataloader = torch.utils.data.DataLoader(
-            dset.CIFAR10(root='../../data', train=True, download=True,
-                         transform=transforms.Compose([
-                             transforms.ToTensor(),
-                             transforms.Normalize((0.5,), (0.5,))
-                         ])),
-            batch_size=options.batchSize, shuffle=True, num_workers=options.workers)
-        val_dataloader = torch.utils.data.DataLoader(
-            dset.CIFAR10('../../data', train=False, download=True,
-                         transform=transforms.Compose([
-                             transforms.ToTensor(),
-                             transforms.Normalize((0.5,), (0.5,))
-                         ])),
-            batch_size=100, shuffle=False, num_workers=options.workers)
+            batch_size=100, shuffle=False)
 
-elif options.dataset == 'CelebA':
-        if options.img_size == 0:
+    elif options.dataset == 'CelebA':
             celebA_imgsize = 64
-        else:
-            celebA_imgsize = options.img_size
-
-        dataloader = torch.utils.data.DataLoader(
-            custom_Dataloader(path=options.dataroot,
-                              transform=transforms.Compose([
-                                  transforms.CenterCrop(150),
-                                  transforms.Scale((celebA_imgsize, celebA_imgsize)),
-                                  transforms.ToTensor(),
-                                  transforms.Normalize((0.5,), (0.5,))
-                              ]), type='train'), batch_size=options.batchSize, shuffle=True,
-            num_workers=options.workers)
+            dataloader = torch.utils.data.DataLoader(
+                custom_Dataloader(path=options.dataroot,
+                                  transform=transforms.Compose([
+                                      transforms.CenterCrop(150),
+                                      transforms.Scale((celebA_imgsize, celebA_imgsize)),
+                                      transforms.ToTensor(),
+                                      transforms.Normalize((0.5,), (0.5,))
+                                  ]), type='train'), batch_size=options.batchSize, shuffle=True,
+                num_workers=options.workers)
 
 
-
-    win_dict = utils.win_dict()
     line_win_dict = utils.win_dict()
     grad_line_win_dict = utils.win_dict()
 
     print("Training Start!")
-    spend_time_log = []
 
     for epoch in range(options.epoch):
         for i, (data, _) in enumerate(dataloader, 0):
             real_cpu = data
-            batch_size = real_cpu.size(0)
+            batch_size = real_cpu.size(0) # for final mini-batch
             input = Variable(real_cpu).cuda()
-            disc_input = input.clone()
 
             real_label = Variable(torch.FloatTensor(batch_size).cuda())
             real_label.data.fill_(1)
+
             fake_label = Variable(torch.FloatTensor(batch_size).cuda())
             fake_label.data.fill_(0)
+
             noise_regularizer = Variable(torch.FloatTensor(real_cpu.shape)).cuda()
             noise_regularizer.data.fill_(1)
-            time_calc.simple_time_start('%06d' % i)
 
-            # autoencoder part
-            if options.intergrationType != 'GANonly':
-                if autoencoder_type == "VAE":
-                    optimizerE.zero_grad()
-                    optimizerD.zero_grad()
-                    mu, logvar = encoder(input)
-                    std = torch.exp(0.5 * logvar)
-                    eps = Variable(torch.randn(std.size()), requires_grad=False).cuda()
-                    z = eps.mul(std).add_(mu)
-                    x_recon = decoder(z)
-                    err_recon, err_KLD = Variational_loss(x_recon, input.detach(), mu, logvar)
-                    err = recon_weight * (err_recon + err_KLD)
-                    err.backward(retain_graph=True)
-                    generator_grad_AE = utils.torch_model_gradient(decoder.parameters())
-                    optimizerE.step()
-                    optimizerD.step()
+            # VAE training
+            optimizerE.zero_grad()
+            optimizerD.zero_grad()
+            mu, logvar = encoder(input)
+            std = torch.exp(0.5 * logvar)
+            eps = Variable(torch.randn(std.size()), requires_grad=False).cuda()
+            z = eps.mul(std).add_(mu)
+            x_recon = decoder(z)
 
+            err_recon, err_KLD = Variational_loss(x_recon, input.detach(), mu, logvar)
 
+            err = recon_weight * (err_recon + err_KLD)
+            err.backward()
+
+            optimizerE.step()
+            optimizerD.step()
 
             # adversarial training part  =======================================================================================
             # adversarial training, discriminator part
-            if options.intergrationType != 'AEonly':  # GAN
-                optimizerDiscriminator.zero_grad()
+            optimizerDiscriminator.zero_grad()
 
-                    if autoencoder_type == 'VAE':
-                        mu, logvar = encoder(generated_fake)
-                        std = torch.exp(0.5 * logvar)
-                        eps = Variable(torch.randn(std.size()), requires_grad=False).cuda()
-                        z = eps.mul(std).add_(mu)
-                    else:
-                        z = encoder(generated_fake)
-                    d_fake = discriminator(z)
+            d_real = discriminator(input)
 
-                    d_real = discriminator(input)
-                    noise = Variable(torch.FloatTensor(batch_size, nz)).cuda()
-                    noise.data.normal_(0, 1)
-                    generated_fake = decoder(noise.view(batch_size, nz, 1, 1))
-                    d_fake = discriminator(generated_fake)
+            noise = Variable(torch.FloatTensor(batch_size, nz)).cuda()
+            noise.data.normal_(0, 1)
+            generated_fake = decoder(noise.view(batch_size, nz, 1, 1))
+            d_fake = discriminator(generated_fake)
 
-                balance_coef = torch.cat((d_fake, d_real), 0).mean()
-                err_discriminator_real = BCE_loss(d_real.view(batch_size), real_label.view(batch_size))
-                err_discriminator_fake = BCE_loss(d_fake.view(batch_size), fake_label.view(batch_size))
-                err_discriminator_origin = err_discriminator_real + err_discriminator_fake
-                err_discriminator = decoder_weight * err_discriminator_origin
-                err_discriminator.backward(retain_graph=True)
+            err_discriminator_real = BCE_loss(d_real.view(batch_size), real_label.view(batch_size)) * decoder_weight
+            err_discriminator_fake = BCE_loss(d_fake.view(batch_size), fake_label.view(batch_size)) * decoder_weight
+            err_discriminator_real.backward()
+            err_discriminator_fake.backward()
 
-                discriminator_grad = utils.torch_model_gradient(discriminator.parameters())
-                optimizerDiscriminator.step()
+            discriminator_grad = utils.torch_model_gradient(discriminator.parameters())
+            optimizerDiscriminator.step()
 
-                # adversarial training, generator part
-                noise = Variable(torch.FloatTensor(batch_size, nz, 1, 1)).cuda()
-                noise.data.normal_(0, 1)
-                    generated_fake = decoder(noise)
-                    d_fake_2 = discriminator(generated_fake)
-                else:
-                    err_generator = BCE_loss(d_fake_2.view(batch_size), real_label.view(batch_size))
-                    err_generator = decoder_weight * err_generator
-                    optimizerD.zero_grad()
-                    err_generator.backward(retain_graph=True)
-                    generator_grad = utils.torch_model_gradient(decoder.parameters())
-                    optimizerD.step()
+            # adversarial training, generator part
+            noise = Variable(torch.FloatTensor(batch_size, nz, 1, 1)).cuda()
+            noise.data.normal_(0, 1)
+            generated_fake = decoder(noise)
+            d_fake_2 = discriminator(generated_fake)
+            err_generator = BCE_loss(d_fake_2.view(batch_size), real_label.view(batch_size))
+            err_generator = decoder_weight * err_generator
+
+            optimizerD.zero_grad()
+            err_generator.backward()
+            generator_grad = utils.torch_model_gradient(decoder.parameters())
+            optimizerD.step()
 
 
-                # visualize
-                print('[%d/%d][%d/%d] d_real: %.4f d_fake: %.4f Balance : %.2f'
-                      % (epoch, options.epoch, i, len(dataloader), d_real.data.mean(), d_fake_2.data.mean(),
-                         balance_coef.data.mean()))
-                # print(float(noise.data.view(noise.shape[0], -1).var(1).mean()))
-                # print(float(noise.data.view(noise.shape[0], -1).mean(1).mean()))
-
-
-            spend_time = time_calc.simple_time_end()
-            spend_time_log.append(spend_time)
+            # visualize
+            print('[%d/%d][%d/%d] d_real: %.4f d_fake: %.4f'
+                  % (epoch, options.epoch, i, len(dataloader), d_real.data.mean(), d_fake_2.data.mean()))
 
             line_win_dict = utils.draw_lines_to_windict(line_win_dict,
                                                                       [err_discriminator_real.data.mean(),
@@ -420,16 +343,6 @@ elif options.dataset == 'CelebA':
                                                                             'zero'],
                                                                            epoch, i, len(dataloader))
 
-        line_win_dict = utils.draw_lines_to_windict(line_win_dict,
-                                                                  [
-                                                                      err_recon.data.mean(),
-                                                                      err_KLD.data.mean(),
-                                                                      0],
-                                                                  [
-                                                                      'recon loss',
-                                                                      'KLD loss',
-                                                                      'zero'], 0, epoch, 0)
-        time_calc.mean_calc()
 
         # do checkpointing
         if epoch % options.save_tick == 0 and options.save:
@@ -445,6 +358,3 @@ elif options.dataset == 'CelebA':
             torch.save(discriminator.state_dict(), os.path.join(options.modelOutFolder,
                                                                 options.pretrainedModelName + "_discriminator" + "_%d.pth" % (
                                                                             epoch + ep)))
-            torch.save(z_discriminator.state_dict(), os.path.join(options.modelOutFolder,
-                                                                  options.pretrainedModelName + "_z_discriminator" + "_%d.pth" % (
-                                                                              epoch + ep)))
